@@ -1,0 +1,64 @@
+import json
+import boto3
+from datetime import datetime
+from dateutil import parser
+import urllib.parse
+
+s3 = boto3.client('s3')
+
+def extract_all_metrics(data, instance_id):
+    output_lines = [
+        f"Instance ID: {instance_id}",
+        f"Date: {datetime.today().strftime('%Y-%m-%d')}",
+        "All Metric Details:\n"
+    ]
+
+    for metric in data:
+        label = metric.get("Label", "UNKNOWN_METRIC")
+        timestamps = metric.get("Timestamps", [])
+        values = metric.get("Values", [])
+
+        if timestamps and values:
+            output_lines.append(f"Metric: {label}")
+            combined = sorted(zip(timestamps, values))
+            for ts, val in combined:
+                ts_local = parser.parse(ts).strftime("%H:%M")
+                output_lines.append(f"{ts_local} → {val}")
+            output_lines.append("")
+
+    return "\n".join(output_lines)
+
+def lambda_handler(event, context):
+    try:
+        # 1. Extract file info from S3 event
+        record = event['Records'][0]
+        bucket_name = record['s3']['bucket']['name']
+        key = urllib.parse.unquote_plus(record['s3']['object']['key'])
+
+        print(f"📥 Processing: s3://{bucket_name}/{key}")
+
+        # Optional: Extract instance ID from filename
+        filename = key.split("/")[-1]  # e.g. 2025-05-30.json
+        instance_id = filename.replace(".json", "")  # fallback if no instance ID
+
+        # 2. Read the .json file
+        response = s3.get_object(Bucket=bucket_name, Key=key)
+        content = response['Body'].read().decode('utf-8')
+        data = json.loads(content)
+
+        # 3. Generate summary
+        summary_text = extract_all_metrics(data, instance_id)
+
+        # 4. Write result to S3
+        output_key = key.replace("cwagent-metrics/", "cwagent-metrics-summary/").replace(".json", ".txt")
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=output_key,
+            Body=summary_text.encode("utf-8"),
+            ContentType="text/plain"
+        )
+
+        print(f"✅ Summary saved to: s3://{bucket_name}/{output_key}")
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        raise e

@@ -1,0 +1,58 @@
+import boto3
+import datetime
+import json
+
+cloudwatch = boto3.client('cloudwatch')
+s3 = boto3.client('s3')
+
+BUCKET_NAME = 's3-log-ec2'
+
+def lambda_handler(event, context):
+    end_time = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    start_time = end_time - datetime.timedelta(days=1)
+
+    # You can list all metrics under namespace 'CWAgent' first
+    metrics = cloudwatch.list_metrics(Namespace='CWAgent')['Metrics']
+
+    # Prepare MetricDataQueries for each metric
+    queries = []
+    for i, metric in enumerate(metrics):
+        metric_name = metric['MetricName']
+        dimensions = metric.get('Dimensions', [])
+        queries.append({
+            'Id': f'm{i}',
+            'MetricStat': {
+                'Metric': {
+                    'Namespace': 'CWAgent',
+                    'MetricName': metric_name,
+                    'Dimensions': dimensions
+                },
+                'Period': 300,  # 5 min granularity, adjust if needed
+                'Stat': 'Average'
+            },
+            'ReturnData': True
+        })
+
+    # Due to limits, max 500 queries per request; chunk if needed
+    all_results = []
+    for i in range(0, len(queries), 100):  # chunk by 100
+        response = cloudwatch.get_metric_data(
+            MetricDataQueries=queries[i:i+100],
+            StartTime=start_time,
+            EndTime=end_time,
+            ScanBy='TimestampAscending'
+        )
+        all_results.extend(response['MetricDataResults'])
+
+    # Save to S3 as JSON
+    key = f'cwagent-metrics/{start_time.strftime("%Y-%m-%d")}.json'
+    s3.put_object(
+        Bucket=BUCKET_NAME,
+        Key=key,
+        Body=json.dumps(all_results, default=str)
+    )
+
+    return {
+        'statusCode': 200,
+        'body': f'Successfully exported CWAgent metrics to s3://{BUCKET_NAME}/{key}'
+    }

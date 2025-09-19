@@ -1,0 +1,87 @@
+import boto3
+import gzip
+import io
+import json
+import re
+from datetime import datetime
+
+s3 = boto3.client('s3')
+
+def parse_log_line(line):
+    match = re.match(r"^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)", line)
+    if not match:
+        return None
+
+    utc_ts = match.group(1)
+    try:
+        date_obj = datetime.strptime(utc_ts, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        date_obj = datetime.strptime(utc_ts, "%Y-%m-%dT%H:%M:%SZ")
+
+    date_str = date_obj.strftime("%Y-%m-%d")
+
+    log_match = re.match(r"^.*?Z\s+(\w+\s+\d+\s+[\d:]+)\s+(\S+)\s+(\S+)\[(\d+)\]:\s+(.*)", line)
+    if log_match:
+        return {
+            "date": date_str,
+            "utc_timestamp": utc_ts,
+            "local_time": log_match.group(1),
+            "hostname": log_match.group(2),
+            "process": log_match.group(3),
+            "pid": log_match.group(4),
+            "message": log_match.group(5)
+        }
+    return {
+        "date": date_str,
+        "utc_timestamp": utc_ts,
+        "raw": line
+    }
+
+def lambda_handler(event, context):
+    bucket = event['Records'][0]['s3']['bucket']['name']
+    object_key = event['Records'][0]['s3']['object']['key']
+
+    if not object_key.endswith(".gz") or not object_key.startswith("cloudwatch-logs/"):
+        print(f"Skipped non-log or non-gz: {object_key}")
+        return
+
+    if "MyUbuntuEC2Stream-syslog" in object_key:
+        log_type = "syslog"
+    elif "MyUbuntuEC2Stream-authlog" in object_key:
+        log_type = "authlog"
+    else:
+        log_type = "unknown"
+
+    try:
+        response = s3.get_object(Bucket=bucket, Key=object_key)
+        gz_body = gzip.GzipFile(fileobj=io.BytesIO(response['Body'].read()))
+        lines = gz_body.read().decode('utf-8').splitlines()
+    except Exception as e:
+        print(f"Failed to read GZ: {e}")
+        return
+
+    logs_by_date = {}
+
+    for line in lines:
+        parsed = parse_log_line(line)
+        if parsed:
+            parsed['log_type'] = log_type
+            logs_by_date.setdefault(parsed['date'], []).append(json.dumps(parsed))
+
+    for date, jsonl_lines in logs_by_date.items():
+        dest_key = f"processed/{log_type}/{date}.jsonl"
+        try:
+            s3.put_object(
+                Bucket=bucket,
+                Key=dest_key,
+                Body='\n'.join(jsonl_lines).encode('utf-8'),
+                ContentType='application/json',
+                Metadata={
+                    "parsed-by": "lambda-log-parser",
+                    "source-log": log_type,
+                    "original": object_key
+                }
+            )
+            print(f"✅ Uploaded: {dest_key}")
+        except Exception as e:
+            print(f"❌ Failed to upload: {dest_key}, error: {e}")

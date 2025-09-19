@@ -1,0 +1,26 @@
+import boto3
+import datetime
+
+def lambda_handler(event, context):
+    client = boto3.client('logs')
+    s3_bucket = 's3-log-ec2'
+    log_group = 'MyUbuntuEC2Logs'
+    
+    # Use timedelta to subtract 1 day safely
+    now = datetime.datetime.utcnow()
+    yesterday = now - datetime.timedelta(days=1)
+
+    start = datetime.datetime(yesterday.year, yesterday.month, yesterday.day)
+    end = datetime.datetime(now.year, now.month, now.day)
+
+    start_timestamp = int(start.timestamp() * 1000)
+    end_timestamp = int(end.timestamp() * 1000)
+    
+    response = client.create_export_task(
+        logGroupName=log_group,
+        fromTime=start_timestamp,
+        to=end_timestamp,
+        destination=s3_bucket,
+        destinationPrefix=f"cloudwatch-logs/{start.strftime('%Y-%m-%d')}"
+    )
+    print("Export task started:", response['taskId'])
